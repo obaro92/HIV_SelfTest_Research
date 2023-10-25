@@ -1,0 +1,331 @@
+---
+title: "HIV_SelfTest_Analysis"
+output: html_document
+date: "2023-09-23"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Data Pre-processesing
+
+```{r Importing the dataset and libraries}
+# Loading the required libraries
+library(dplyr)
+library(tidyverse)
+library(ggplot2)
+library(tableone)
+library(caTools)
+library(caret)
+library(summarytools)
+library(cowplot)
+library(stats)
+library(pROC)
+require(ResourceSelection)
+library(lmtest)
+library(randomForest)
+
+# Importing the dataset
+data <- read.csv("combined1.csv", na.strings = "")
+# Data summary
+str(data)
+```
+
+```{r Cleaning and Transforming the Data}
+# Dropping variables that are not required
+data1 <- data %>% select(-Date, -ClientCode, -SeekCare)
+
+# Converting to an integer in order to merge ease of use variables
+data1$CheckExpiry <- as.integer(data1$CheckExpiry)
+
+# Select the columns for ease of use ratings
+ease_of_use_cols <- c("CheckExpiry", "ReadingInstruction", "SetKitUp", 
+                      "PrickingSelf", "Timing", "ReadingResults", 
+                      "InterpretingResults", "DisposingTest")
+
+# Calculate the median for each row
+data1$Combined_EaseOfUse <- apply(data1[ease_of_use_cols], 1, function(x) {
+  combined_median <- median(x)
+  rounded_median <- floor(combined_median)
+  mapped_median <- match(rounded_median, c(1, 2, 3, 4, 5))
+  return(mapped_median)
+})
+
+#Remove combined variables
+data1 <- data1 %>% select(-ease_of_use_cols)
+
+# Converting character variables to factor
+data1 <- data1 %>%
+  mutate(across(c(
+    Sex, EducationLevel, MaritalStatus, Ocupation, MonthlyIncome, 
+    YesParticipatedYes, Assisted, Reactive, WillingPay, TestFrequency, 
+    RecommendTest, HighRisk, VoluntarFollowUp, AcessPoint, Combined_EaseOfUse
+  ), as.factor))
+
+# Converting charcter variables to integers
+data1$HowMuch <- as.integer(data1$HowMuch)
+
+#Creating a list of all categorical variables
+catVars <- c("Sex", "EducationLevel", "MaritalStatus", "Ocupation", "MonthlyIncome", "YesParticipatedYes", "Assisted", "Reactive", "WillingPay", "TestFrequency", "RecommendTest", "HighRisk", "VoluntarFollowUp", "AcessPoint", "Combined_EaseOfUse")
+
+# Trimming out spaces from the variable names due to the CSV file
+data1 <- data1 %>%
+  mutate(across(all_of(catVars), ~ factor(trimws(.))))
+
+#Adjusting how factors are coded to have a cleaner data
+data1 <- data1 %>%
+  mutate(
+    Sex = recode(Sex, "f" = "F"),
+    Assisted = recode(Assisted, "y" = "Y"),
+    RecommendTest = recode(RecommendTest, "y" = "Y", "NO" = "N", "YES" = "Y"),
+    VoluntarFollowUp = recode(VoluntarFollowUp, "y" = "Y")
+  )
+
+# Poorly captured data to exclude
+Excluded <- data1 %>%
+  filter(
+    Age < 15 |
+      TestFrequency == "Others" |
+      HighRisk %in% c("11", "4", "5") |
+      MaritalStatus %in% c("5", "7") |
+      EducationLevel == "33"
+        )
+
+# Excluding poorly captured data
+data2 <- anti_join(data1, Excluded)
+
+# Create Age band variable based on specified age groups
+data2$AgeBand <- cut(data2$Age, breaks = c(15, 25, 40, Inf),
+                     labels = c("15-24", "25-39", ">40"),
+                     right = FALSE)
+
+# Dropping the Age variable
+# Data2 is the cleaned data for analysis
+data2 <- data2 %>% select(-Age)
+
+```
+
+## Descriptive Statistics
+```{r Detailed data description with missing data}
+#Creating a list of all variables
+catVars <- c("AgeBand", "Sex", "EducationLevel", "MaritalStatus", "Ocupation", "MonthlyIncome", "YesParticipatedYes", "Assisted", "Reactive", "WillingPay", "TestFrequency", "RecommendTest", "HighRisk", "VoluntarFollowUp", "AcessPoint", "Combined_EaseOfUse")
+
+myVars <- c("AgeBand", "Sex", "EducationLevel", "MaritalStatus", "Ocupation", "MonthlyIncome", "YesParticipatedYes", "Assisted",  "Reactive", "WillingPay", "HowMuch", "TestFrequency", "RecommendTest", "HighRisk", "Combined_EaseOfUse", "VoluntarFollowUp", "AcessPoint")
+
+# Descriptive statistics for study
+Des_Table <- CreateTableOne(vars = myVars, data = data2, factorVars = catVars)
+
+# Recode some variables due to groups with sparse data
+data2 <- data2 %>%
+  mutate(MonthlyIncome = recode(MonthlyIncome, "4" = "4_5", "5" = "4_5", "6"="0"),
+         Combined_EaseOfUse = recode(Combined_EaseOfUse, "1"="<3", "2"="<3", "3"="<3"))
+
+# Descriptive statistics for study
+Des_Table <- CreateTableOne(vars = myVars, data = data2, factorVars = catVars)
+# Descriptive statistics with missing data
+summary(Des_Table$ContTable)
+summary(Des_Table$CatTable) 
+```
+
+## Sub-group Analysis (Acceptability of HIV Self-test kits)
+```{r Assessing Acceptability of HIVST}
+# Creating another variant of data2 for analysis
+data3 <- data2
+
+# Convert YesParticipatedYes to numeric (1 for "Y" and "YN", 0 for "N")
+data3$YesParticipatedYes <- ifelse(data3$YesParticipatedYes %in% c("Y", "YN"), 1, 0)
+
+# Calculate acceptability rates
+# Acceptability rate generally aroud 99%. Nothing really interesting
+acceptability_Age <- aggregate(YesParticipatedYes ~ AgeBand, data = data3, function(x) sum(x == 1) / length(x))
+print(acceptability_Age)
+
+acceptability_Sex <- aggregate(YesParticipatedYes ~ Sex, data = data3, function(x) sum(x == 1) / length(x))
+print(acceptability_Sex)
+
+acceptability_Risk <- aggregate(YesParticipatedYes ~ HighRisk, data = data3, function(x) sum(x == 1) / length(x))
+print(acceptability_Risk)
+
+acceptability_Education <- aggregate(YesParticipatedYes ~ EducationLevel, data = data3, function(x) sum(x == 1) / length(x))
+print(acceptability_Education)
+
+acceptability_Occupation <- aggregate(YesParticipatedYes ~ Ocupation, data = data3, function(x) sum(x == 1) / length(x))
+print(acceptability_Occupation)
+
+```
+
+## Willingness to Pay
+```{r Assessing Willingness to Pay}
+
+# Those Willing to Pay
+WPayData <- data2 %>%
+  filter(WillingPay == "Y")
+
+# Transforming the data
+data3$WillingPay <- ifelse(data3$WillingPay == "Y", 1, ifelse(data3$WillingPay == "N", 0, data3$WillingPay))
+
+# Willingness Income
+Willingpay_Income <- aggregate(WillingPay ~ MonthlyIncome, data = data3, function(x) sum(x) / length(x))
+WPay_Income <- table(data3$MonthlyIncome, data3$WillingPay)
+print(WPay_Income)
+
+# Willingness Age
+Willingpay_Age <- aggregate(WillingPay ~ AgeBand, data = data3, function(x) sum(x) / length(x))
+print(Willingpay_Age)
+
+# Willingness Education
+Willingpay_Education <- aggregate(WillingPay ~ EducationLevel, data = data3, function(x) sum(x) / length(x))
+print(Willingpay_Education)
+
+# Willingness Occupation
+Willingpay_Occupation <- aggregate(WillingPay ~ Ocupation, data = data3, function(x) sum(x) / length(x))
+print(Willingpay_Occupation)
+
+# Willingness AccessPoint
+Willingpay_AccessPoint <- aggregate(WillingPay ~ AcessPoint, data = data3, function(x) sum(x) / length(x))
+print(Willingpay_AccessPoint)
+
+# Willingness Risk
+# Since significant, evaluate the characteristics of those in the high risk
+Willingpay_Risk <- aggregate(WillingPay ~ HighRisk, data = data3, function(x) sum(x) / length(x))
+print(Willingpay_Risk)
+
+data3$HighRisk <- as.character(data3$HighRisk)
+contingency_table <- table(data3$HighRisk, data3$WillingPay)
+chi_square_testRiskWillingPay <- chisq.test(contingency_table)
+chi_square_testRiskWillingPay
+
+# Ease of Use against Assissted
+# Not much difference between ratings for those assisted or not
+Ease_Assissted <- table(data3$Combined_EaseOfUse, data3$Assisted)
+mosaicplot(Ease_Assissted, color = TRUE,
+           main = "Mosaic Plot of Assisted vs Ease of use",
+           xlab = "Ease of use", ylab = "Assisted")
+
+#2
+# Calculate average willingness to pay for each income range (excluding N/A values)
+hist(WPayData$HowMuch) # Even though it is skewed, the median across is uniform
+average_wtp <- aggregate(HowMuch ~ MonthlyIncome, data = na.omit(WPayData), mean)
+# ANOVA to check difference within groups
+result_anova <- aov(HowMuch ~ MonthlyIncome, data = WPayData)
+summary(result_anova)
+tukey_result <- TukeyHSD(result_anova)
+print(tukey_result)
+
+# HighRisk and Reactive
+contingency_table <- table(data3$HighRisk, data3$Reactive)
+chi_square_test <- chisq.test(contingency_table)
+print(chi_square_test)
+library(vcd)
+mosaicplot(contingency_table, color = TRUE,
+           main = "Mosaic Plot of High Risk vs Reactive",
+           xlab = "Reactive", ylab = "High Risk")
+
+# Calculate the proportions (percentages) for each combination
+HighRiskReactive <- prop.table(table(na.omit(data3[, c("HighRisk", "Reactive")])), margin = 1) * 100
+print(HighRiskReactive)
+
+```
+
+## Predicting Willingness to Pay (Logistic Regression)
+```{r Predicting willingness to Pay}
+# Filter by Participants that accepted the test kit and participated in the study
+SData <- data2 %>%
+  filter(YesParticipatedYes == "Y")
+
+# Checking for missing data in the study data
+SData2 <- SData # Create another variant of the study data
+SData2 <- SData2 %>% select(-YesParticipatedYes, -HowMuch, -TestFrequency)
+# Create a matrix plot to visualize missing data pattern
+#aggr(SData2, combined = TRUE, numbers = TRUE)
+
+# Dropping Missing data as not more than 5%
+SData2 <- SData2 %>% drop_na()
+
+# Dropping variables not used in modelling
+SData2 <- SData2 %>% select(-EducationLevel, -AgeBand, -VoluntarFollowUp, -Sex, -RecommendTest, -Combined_EaseOfUse, -MaritalStatus, -Ocupation, -Reactive)
+
+# Set seed for reproducibility
+set.seed(123)
+
+# Splitting data into training and test set
+split_indices <- createDataPartition(SData2$WillingPay, p = 0.8, list = FALSE)
+train_data <- SData2[split_indices, ]
+test_data <- SData2[-split_indices, ]
+
+# Logistic regression using training set
+# Relevel the MonthlyIncome variable with "0" as the reference level
+train_data$MonthlyIncome <- relevel(train_data$MonthlyIncome, ref = "0")
+
+# Fit the logistic regression model
+model <- glm(WillingPay ~ ., data = train_data, family = "binomial")
+
+# Chi-squared test for deviance
+print(anova(model, test = "Chisq"))
+
+# Model summary and confidence interval
+summary(model)
+confint(model, level = 0.95)
+
+# Extract coefficients, p-values, and confidence intervals
+coef_df <- data.frame(
+  Variables = names(coef(model)),
+  Coefficients = coef(model),
+  PValues = summary(model)$coefficients[, "Pr(>|z|)"],
+  LowerCI = confint(model)[, 1],
+  UpperCI = confint(model)[, 2]
+)
+
+#Predicting on the test set
+predictions <- predict(model, newdata = test_data, type = "response")
+# Assuming you've calculated predicted_classes using the given threshold
+predicted_classes <- ifelse(predictions > 0.5, "Y", "N")
+# Creating factors with the same levels and swapping the order
+predicted_classes <- factor(predicted_classes, levels = c("Y", "N"))
+reference <- factor(test_data$WillingPay, levels = c("Y", "N"))
+
+# Creating confusion matrix
+confusion_matrix <- confusionMatrix(predicted_classes, reference)
+# Print the confusion matrix and calculated metrics
+print(confusion_matrix)
+
+# ROC curve and AUC
+roc_obj <- roc(response = reference, predictor = predictions, levels = c("Y", "N"))
+plot(roc_obj, main = "ROC Curve")
+auc <- auc(roc_obj)
+print(paste("AUC:", auc))
+```
+
+## Evaluating the Model
+```{r Evaluate the Logistic Regression}
+
+# Likelihood Ratio Test
+null_model <- glm(WillingPay ~ 1, data = train_data, family = "binomial")
+lrt <- lrtest(null_model, model)
+print(lrt)
+
+
+# Applying Hosmer-Lemeshow statistic and test
+HL <- hoslem.test(x = model$y, y = fitted(model), g = 10) 
+HL
+plot(HL$observed[,"y1"], HL$expected[,"yhat1"])
+plot(HL$observed[,"y0"], HL$expected[,"yhat0"])
+plot(x = HL$observed[,"y1"]/(HL$observed[,"y1"]+HL$observed[,"y0"]), 
+     y = HL$expected[,"yhat1"]/(HL$expected[,"yhat1"]+HL$expected[,"yhat0"])) 
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
